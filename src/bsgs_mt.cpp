@@ -68,6 +68,28 @@ static bool parse_hex_u256(const std::string& hex, Int &out) {
   return true;
 }
 
+// --- 64-bit extraction helpers for Int ---
+
+// Return the low 64 bits of an Int (no fit check).
+static inline uint64_t u64_lo_from_Int(const Int& x) {
+  uint8_t b[32];
+  const_cast<Int&>(x).Get32Bytes(b);   // Int::Get32Bytes isn't const, so cast
+  uint64_t v = 0;
+  for (int i = 24; i < 32; ++i) v = (v << 8) | b[i];
+  return v;
+}
+
+// If x fits fully in 64 bits (upper 192 bits are zero), write it to 'out' and return true.
+static inline bool int_to_u64_exact(const Int& x, uint64_t& out) {
+  uint8_t b[32];
+  const_cast<Int&>(x).Get32Bytes(b);
+  for (int i = 0; i < 24; ++i) if (b[i] != 0) return false;  // any high byte non-zero → doesn't fit
+  uint64_t v = 0;
+  for (int i = 24; i < 32; ++i) v = (v << 8) | b[i];
+  out = v;
+  return true;
+}
+
 static void read_targets_as_compressed33(const std::string& path,
                                          std::vector<uint8_t>& out33,
                                          Secp256K1& secp) {
@@ -363,7 +385,7 @@ int run_bsgs_mt(const BsgsMtOptions& opt){
   Int q0(K0); Int r0; q0.Div(&mInt, &r0); // q0 = floor(K0/m), r0 = K0 % m
   Int q1(K1); Int r1; q1.Div(&mInt, &r1); // q1 = floor(K1/m), r1 = K1 % m
 
-    // --- Build per-node resources (replicate baby & sets) ---
+  // --- Build per-node resources (replicate baby & sets) ---
   std::vector<NodeResources> res(nodes.size());
   size_t bytes_all = opt.baby_size * sizeof(Point);
   fprintf(stderr, "[bsgs-mt] sizeof(Point)=%zu, baby m=%llu, per-node bytes=%.2f GiB\n",
@@ -448,7 +470,7 @@ int run_bsgs_mt(const BsgsMtOptions& opt){
       uint64_t rem64 = u64_lo_from_Int(rem);
       uint64_t this_chunk = rem64 ? std::min<uint64_t>(rem64, CHUNK) : CHUNK;
 
-      fprintf(stderr, "[bsgs-mt] chunk start (big): i = cur, count = %llu\n",
+      fprintf(stderr, "[bsgs-mt] chunk start (big): i = cur, count = %llu\n", 
               (unsigned long long)this_chunk);
 
       std::vector<std::thread> pool;
