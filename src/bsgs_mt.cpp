@@ -194,9 +194,6 @@ static void build_baby_table_mt(Point* B, uint64_t m, int threads) {
   // Launch
   std::vector<std::thread> th;
   th.reserve(threads);
-  fprintf(stderr, "[bsgs-mt] starting giant steps: i in [%llu, %llu), block=%d, threads=%d\n",
-        (unsigned long long)i0, (unsigned long long)i1, opt.block_size,
-        (opt.threads>0?opt.threads:cpu_count()));
   for (int t=0; t<threads; ++t) {
     uint64_t j0 = (uint64_t)t * chunk;
     if (j0 >= m) break;
@@ -330,6 +327,9 @@ int run_bsgs_mt(const BsgsMtOptions& opt){
   uint64_t i0 = u64_from_Int(q0);
   uint64_t i1 = u64_from_Int(q1);
   if (i1 < i0) { fprintf(stderr,"[bsgs-mt] empty range\n"); return 0; }
+  int total_threads = (opt.threads > 0) ? opt.threads : cpu_count();
+  fprintf(stderr, "[bsgs-mt] starting giant steps: i in [%llu, %llu), block=%d, threads=%d\n",
+          (unsigned long long)i0, (unsigned long long)i1, opt.block_size, total_threads);
 
   // --- Build per-node resources (replicate baby & sets) ---
   std::vector<NodeResources> res(nodes.size());
