@@ -59,20 +59,32 @@ These flags are in addition to the usual ones (-f, -r, -t, …).
 
 ### Membership backend -Y
 - tag+exact (default):
- - Prefilter: 65,536 buckets × 1-byte tag (fast negative tests).
- - Exact set: Open-addressed hash + embedded 33-byte pubkey blob.
- - RAM ≈ ~53 bytes × N_targets (breakdown below).
+  - Prefilter: 65,536 buckets × 1-byte tag (fast negative tests).
+  - Exact set: Open-addressed hash + embedded 33-byte pubkey blob.
+  - RAM ≈ ~53 bytes × N_targets (breakdown below).
 
 - bloom:
- - RAM ≈ bits_per_item × N / 8, where
- - bits_per_item = -ln(FPP) / (ln2^2) ≈ 1.44 × log2(1/FPP).
- - With -P 1e-9, that’s ≈ 43 bits/key ≈ 5.4 bytes/key.
+  - RAM ≈ bits_per_item × N / 8, where
+  - bits_per_item = -ln(FPP) / (ln2^2) ≈ 1.44 × log2(1/FPP).
+  - With -P 1e-9, that’s ≈ 43 bits/key ≈ 5.4 bytes/key.
 
 ### Exact-set memory breakdown
- - Blob: 33 × N
- - Table (load ~0.8): 16 × (N/0.8) ≈ 20 × N
- - TagPrefilter: ~1 × N + ~0.5 MB index
- - Total ≈ (33 + 20 + 1) × N ≈ 54 × N bytes
+- Blob: 33 × N
+- Table (load ~0.8): 16 × (N/0.8) ≈ 20 × N
+- TagPrefilter: ~1 × N + ~0.5 MB index
+- Total ≈ (33 + 20 + 1) × N ≈ 54 × N bytes
+
+## NUMA (Linux)
+- -U auto discovers nodes and replicates baby table + membership per node.
+- Threads on a node work on the local copy (best locality).
+- -U nodes=0,1 restricts to specific nodes.
+- -L local keeps each thread’s memory local to its node (recommended).
+- -L interleave spreads allocations across nodes (lower peak per-node RAM, but less locality).
+- -H on adds madvise(MADV_HUGEPAGE); can help with large contiguous allocations on some kernels.
+
+## Performance notes & tuning
+For millions of targets, tag+exact is fastest (no confirm path cost after a match).
+Ensure you budget RAM for both baby table(s) and membership structures.
 
 # keyhunt
 
