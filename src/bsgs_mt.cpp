@@ -542,8 +542,9 @@ int run_bsgs_mt(const BsgsMtOptions& opt){
           pin_thread_to_node_cpu(nodes[ni], t);
           Int i_begin_big; i_begin_big.SetInt32(0); i_begin_big.Add(tb);
           uint64_t cnt = te - tb;
+          bool is_reporter = (ni == 0 && t == 0);
           worker_bsgs_big(res[ni], i_begin_big, cnt, opt.block_size, secp,
-                          targetsP, K0, K1, mInt);
+                          targetsP, K0, K1, mInt, is_reporter);
         });
       }
     }
@@ -586,8 +587,9 @@ int run_bsgs_mt(const BsgsMtOptions& opt){
 
           pool.emplace_back([&, ni, i_begin_big, cnt, t]{
             pin_thread_to_node_cpu(nodes[ni], t);
+            bool is_reporter = (ni == 0 && t == 0);
             worker_bsgs_big(res[ni], i_begin_big, cnt, opt.block_size, secp,
-                            targetsP, K0, K1, mInt);
+                            targetsP, K0, K1, mInt, is_reporter);
           });
         }
       }
