@@ -14,6 +14,7 @@ email: albertobsd@gmail.com
 #include "base58/libbase58.h"
 #include "rmd160/rmd160.h"
 #include "oldbloom/oldbloom.h"
+#include "bsgs_mt.h"
 #include "bloom/bloom.h"
 #include "sha3/sha3.h"
 #include "util.h"
@@ -55,6 +56,8 @@ email: albertobsd@gmail.com
 #define MODE_PUB2RMD 4
 #define MODE_MINIKEYS 5
 #define MODE_VANITY 6
+// new multi-target mode
+#define MODE_BSGS_MT 7
 
 #define SEARCH_UNCOMPRESS 0
 #define SEARCH_COMPRESS 1
@@ -225,7 +228,7 @@ char *bit_range_str_min;
 char *bit_range_str_max;
 
 const char *bsgs_modes[5] = {"sequential","backward","both","random","dance"};
-const char *modes[7] = {"xpoint","address","bsgs","rmd160","pub2rmd","minikeys","vanity"};
+const char *modes[8] = {"xpoint","address","bsgs","rmd160","pub2rmd","minikeys","vanity","bsgs-mt"};
 const char *cryptos[3] = {"btc","eth","all"};
 const char *publicsearch[3] = {"uncompress","compress","both"};
 const char *default_fileName = "addresses.txt";
@@ -436,7 +439,15 @@ int main(int argc, char **argv)	{
 	Int total,pretotal,debugcount_mpz,seconds,div_pretotal,int_aux,int_r,int_q,int58;
 	struct bPload *bPload_temp_ptr;
 	size_t rsize;
-	
+	/* --- BSGS-MT local options (defaults) --- */
+	uint64_t BSGSMT_BABY = (1ull<<28);      // 268,435,456
+	int      BSGSMT_BLOCK = 8192;
+	const char *BSGSMT_FILTER = "tag+exact";
+	double   BSGSMT_BLOOM_FPP = 1e-9;
+	const char *BSGSMT_NUMA = "auto";
+	const char *BSGSMT_NUMA_POLICY = "local";
+	int      BSGSMT_HUGEPAGES = 0;
+
 #if defined(_WIN64) && !defined(__CYGWIN__)
 	DWORD s;
 	write_keys = CreateMutex(NULL, FALSE, NULL);
@@ -486,7 +497,7 @@ int main(int argc, char **argv)	{
 	
 	printf("[+] Version %s, developed by AlbertoBSD\n",version);
 
-	while ((c = getopt(argc, argv, "deh6MqRSB:b:c:C:E:f:I:k:l:m:N:n:p:r:s:t:v:G:8:z:")) != -1) {
+	while ((c = getopt(argc, argv, "deh6MqRSB:b:c:C:E:f:I:k:l:m:N:n:p:r:s:t:v:G:8:z:J:W:Y:P:U:L:H:")) != -1) {
 		switch(c) {
 			case 'h':
 				menu();
@@ -621,7 +632,7 @@ int main(int argc, char **argv)	{
 				printf("[+] Matrix screen\n");
 			break;
 			case 'm':
-				switch(indexOf(optarg,modes,7)) {
+				switch(indexOf(optarg,modes,8)) {
 					case MODE_XPOINT: //xpoint
 						FLAGMODE = MODE_XPOINT;
 						printf("[+] Mode xpoint\n");
@@ -656,6 +667,10 @@ int main(int argc, char **argv)	{
 							checkpointer((void *)vanity_bloom,__FILE__,"calloc","vanity_bloom" ,__LINE__ -1);
 						}
 					break;
+					case MODE_BSGS_MT:
+			            FLAGMODE = MODE_BSGS_MT;
+            			printf("[+] Mode bsgs-mt\n");
+        			break;
 					default:
 						fprintf(stderr,"[E] Unknow mode value %s\n",optarg);
 						exit(EXIT_FAILURE);
@@ -770,6 +785,41 @@ int main(int argc, char **argv)	{
 				}
 				printf("[+] Bloom Size Multiplier %i\n",FLAGBLOOMMULTIPLIER);
 			break;
+			case 'J': {
+				// baby size m (absolute, e.g. 268435456 for 2^28)
+				unsigned long long v = strtoull(optarg, NULL, 0);
+				if (!v) { fprintf(stderr,"[E] invalid -J baby size\n"); exit(EXIT_FAILURE); }
+				BSGSMT_BABY = (uint64_t)v;
+				printf("[+] bsgs-mt baby m = %" PRIu64 "\n", BSGSMT_BABY);
+			} break;
+			case 'W': {
+				int v = (int)strtol(optarg,NULL,10);
+				if (v <= 0) v = 8192;
+				BSGSMT_BLOCK = v;
+				printf("[+] bsgs-mt block = %d\n", BSGSMT_BLOCK);
+			} break;
+			case 'Y': {
+				BSGSMT_FILTER = optarg; // "tag+exact" or "bloom"
+				printf("[+] bsgs-mt filter = %s\n", BSGSMT_FILTER);
+			} break;
+			case 'P': {
+				BSGSMT_BLOOM_FPP = atof(optarg);
+				if (BSGSMT_BLOOM_FPP <= 0) BSGSMT_BLOOM_FPP = 1e-9;
+				printf("[+] bsgs-mt bloom fpp = %.12g\n", BSGSMT_BLOOM_FPP);
+			} break;
+			case 'U': {
+				BSGSMT_NUMA = optarg; // "auto" | "off" | "nodes=0,1"
+				printf("[+] bsgs-mt numa = %s\n", BSGSMT_NUMA);
+			} break;
+			case 'L': {
+				BSGSMT_NUMA_POLICY = optarg; // "local" | "interleave"
+				printf("[+] bsgs-mt numa-policy = %s\n", BSGSMT_NUMA_POLICY);
+			} break;
+			case 'H': {
+				if (!strcasecmp(optarg,"on") || !strcmp(optarg,"1")) BSGSMT_HUGEPAGES = 1;
+				else BSGSMT_HUGEPAGES = 0;
+				printf("[+] bsgs-mt hugepages = %s\n", BSGSMT_HUGEPAGES? "on":"off");
+			} break;
 			default:
 				fprintf(stderr,"[E] Unknow opcion -%c\n",c);
 				exit(EXIT_FAILURE);
@@ -932,6 +982,34 @@ int main(int argc, char **argv)	{
 			printf("[+] -- to   : 0x%s\n",hextemp);
 			free(hextemp);
 		}
+		        // ---- NEW: fast path for bsgs-mt ----
+        if (FLAGMODE == MODE_BSGS_MT) {
+            if (!fileName) {
+                fprintf(stderr,"[E] bsgs-mt requires -f <targets file>\n");
+                exit(EXIT_FAILURE);
+            }
+            if (!FLAGRANGE) {
+                fprintf(stderr,"[E] bsgs-mt requires -r <start:end> (hex)\n");
+                exit(EXIT_FAILURE);
+            }
+
+            BsgsMtOptions opt;
+            opt.targets_path    = fileName;
+            opt.range_start_hex = range_start;
+            opt.range_end_hex   = range_end;
+            opt.baby_size       = BSGSMT_BABY;
+            opt.block_size      = BSGSMT_BLOCK;
+            opt.threads         = NTHREADS;
+            opt.filter_kind     = BSGSMT_FILTER;
+            opt.bloom_fpp       = BSGSMT_BLOOM_FPP;
+            opt.numa_mode       = BSGSMT_NUMA;
+            opt.numa_policy     = BSGSMT_NUMA_POLICY;
+            opt.hugepages       = (BSGSMT_HUGEPAGES != 0);
+
+            // hand off to the new engine and finish the program
+            return run_bsgs_mt(opt);
+        }
+        // ---- END NEW: fast path for bsgs-mt ----
 
 		switch(FLAGMODE)	{
 			case MODE_MINIKEYS:
