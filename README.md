@@ -12,9 +12,9 @@ Builds on Linux and MinGW64/Windows (NUMA flags become no-ops on Windows).
 
 ## Quick Start
 
-...
+```
 ./keyhunt -m bsgs-mt -f pubkeys.txt -r 4000000000000000000000000000000000:7fffffffffffffffffffffffffffffffff -t 28 -J 268435456 W 8192 -Y tag+exact -U auto -L local -H off
-...
+```
 
 - pubkeys.txt: one hex pubkey per line. Accepts 33-byte compressed (02… / 03…) or 65-byte uncompressed (04…). Uncompressed inputs are internally compressed.
 - -r start:end: 256-bit hex range (inclusive).
@@ -22,9 +22,9 @@ Builds on Linux and MinGW64/Windows (NUMA flags become no-ops on Windows).
 - -Y tag+exact: fastest exact membership; use -Y bloom + -P 1e-9 if RAM is tight.
 
 Windows/MinGW64 example (NUMA flags ignored safely):
-...
+```
 keyhunt.exe -m bsgs-mt -f pubkeys.txt -r <start:end> -t 24 -J 268435456 -W 8192 -Y tag+exact
-...
+```
 
 ## CLI Reference
 
@@ -51,7 +51,7 @@ These flags are in addition to the usual ones (-f, -r, -t, …).
 - Larger m → fewer giant steps → less per-step work, but more RAM.
 - Memory for baby table: m × sizeof(Point) bytes per NUMA node (replicated).
 - Practical guidance on a 128 GB dual-socket host:
-- - Start with -J 268435456 (2^28). If RAM is tight (exact set also large), try 2^27.
+  - Start with -J 268435456 (2^28). If RAM is tight (exact set also large), try 2^27.
 
 ### Block size -W
 - Batches n consecutive j steps to keep data hot in cache and amortize overhead.
@@ -59,15 +59,20 @@ These flags are in addition to the usual ones (-f, -r, -t, …).
 
 ### Membership backend -Y
 - tag+exact (default):
--- Prefilter: 65,536 buckets × 1-byte tag (fast negative tests).
--- Exact set: Open-addressed hash + embedded 33-byte pubkey blob.
--- RAM ≈ ~53 bytes × N_targets (breakdown below).
+ - Prefilter: 65,536 buckets × 1-byte tag (fast negative tests).
+ - Exact set: Open-addressed hash + embedded 33-byte pubkey blob.
+ - RAM ≈ ~53 bytes × N_targets (breakdown below).
 
 - bloom:
--- RAM ≈ bits_per_item × N / 8, where
--- bits_per_item = -ln(FPP) / (ln2^2) ≈ 1.44 × log2(1/FPP).
--- With -P 1e-9, that’s ≈ 43 bits/key ≈ 5.4 bytes/key.
+ - RAM ≈ bits_per_item × N / 8, where
+ - bits_per_item = -ln(FPP) / (ln2^2) ≈ 1.44 × log2(1/FPP).
+ - With -P 1e-9, that’s ≈ 43 bits/key ≈ 5.4 bytes/key.
 
+### Exact-set memory breakdown
+ - Blob: 33 × N
+ - Table (load ~0.8): 16 × (N/0.8) ≈ 20 × N
+ - TagPrefilter: ~1 × N + ~0.5 MB index
+ - Total ≈ (33 + 20 + 1) × N ≈ 54 × N bytes
 
 # keyhunt
 
