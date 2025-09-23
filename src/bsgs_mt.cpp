@@ -351,10 +351,11 @@ static void worker_bsgs(const WorkerJob& job){
 static void worker_bsgs_big(const NodeResources& R,
                             const Int& i_begin,
                             uint64_t count,
-                            int block,         // unused now; keep signature
+                            int /*block*/,      // unused
                             Secp256K1& /*secp_shared*/,
                             const std::vector<Point>& targetsP,
-                            const Int& K0, const Int& K1, const Int& mInt) {
+                            const Int& K0, const Int& K1, const Int& mInt,
+                            bool is_reporter) {
   // Thread-local EC (safer than sharing)
   Secp256K1 secp; secp.Init();
 
@@ -398,12 +399,20 @@ static void worker_bsgs_big(const NodeResources& R,
     base = secp.Add(base, M);
     i_cur.Add((uint64_t)1);
 
-    if ((step & ((1u<<20)-1)) == 0) { // every ~1M steps
-      fprintf(stderr, "[bsgs-mt] progress: +%llu steps\n",
-              (unsigned long long)step);
-      fflush(stderr);
+    // progress: update on the same line from a single "reporter" thread
+    if (is_reporter) {
+      const uint64_t report_every = (1ull<<20); // ~1M steps
+      if ((step & (report_every - 1)) == 0 || step + 1 == count) {
+        double pct = (count ? (100.0 * (double)(step + 1) / (double)count) : 100.0);
+        fprintf(stderr, "\r[bsgs-mt] progress: %13llu / %13llu (%.2f%%)   ",
+                (unsigned long long)(step + 1),
+                (unsigned long long)count,
+                pct);
+        fflush(stderr);
+      }
     }
   }
+  if (is_reporter) { fprintf(stderr, "\n"); fflush(stderr); }
 }
 
 // Public entry (call from your CLI)
