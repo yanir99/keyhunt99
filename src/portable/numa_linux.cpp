@@ -40,8 +40,9 @@ NumaTopo numa_discover() {
       NumaCpuSet cs; cs.node = node;
       struct bitmask* mask = numa_allocate_cpumask();
       if (numa_node_to_cpus(node, mask) == 0) {
-        for (int cpu=0; cpu<mask->size; ++cpu)
-          if (numa_bitmask_isbitset(mask, cpu)) cs.cpus.push_back(cpu);
+        for (unsigned long cpu = 0; cpu < mask->size; ++cpu) {
+          if (numa_bitmask_isbitset(mask, cpu)) cs.cpus.push_back((int)cpu);
+        }
       }
       numa_free_cpumask(mask);
       if (!cs.cpus.empty()) t.groups.push_back(std::move(cs));
@@ -78,8 +79,13 @@ void numa_set_thread_mem_policy_portable(const NumaConfig& cfg, const NumaTopo& 
       int bit = n % (int)(8*sizeof(unsigned long));
       nodemask[idx] |= (1UL << bit);
     };
-    if (!cfg.restrict_nodes.empty()) for (int n: cfg.restrict_nodes) if (n>=0 && n<=topo.max_node) allow_node(n);
-    else for (const auto& g : topo.groups) allow_node(g.node);
+    if (!cfg.restrict_nodes.empty()) {
+      for (int n : cfg.restrict_nodes) {
+        if (n >= 0 && n <= topo.max_node) allow_node(n);
+      }
+    } else {
+      for (const auto& g : topo.groups) allow_node(g.node);
+    }
     int mode = (cfg.policy == NumaPolicy::INTERLEAVE) ? MPOL_INTERLEAVE : MPOL_PREFERRED;
     if (mode == MPOL_PREFERRED) {
       int chosen = node_index;

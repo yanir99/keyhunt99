@@ -67,6 +67,7 @@ static bool parse_hex_u256(const std::string& hex, Int &out) {
 }
 
 static void read_targets_as_compressed33(const std::string& path, std::vector<uint8_t>& out33, Secp256K1& secp) {
+  (void)secp;
   FILE* f = fopen(path.c_str(), "rb");
   if(!f){ fprintf(stderr,"[bsgs-mt] cannot open targets file\n"); return; }
   char line[256];
@@ -280,6 +281,6 @@ int run_bsgs_mt(const BsgsMtOptions& opt){
   for(auto& th: pool) th.join();
 
   // Cleanup
-  for(auto& R: res){ if (R.baby) numa_free_portable(R.baby, R.baby_bytes); }
+  for(auto& R: res){ if (R.baby) numa_free(R.baby, R.baby_bytes); }
   return 0;
 }
