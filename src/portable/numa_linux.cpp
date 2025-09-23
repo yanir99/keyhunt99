@@ -65,7 +65,7 @@ static void set_hugepage_advise(void* p, size_t bytes, bool on) {
 #endif
 }
 
-void numa_set_thread_mem_policy(const NumaConfig& cfg, const NumaTopo& topo, int node_index) {
+void numa_set_thread_mem_policy_portable(const NumaConfig& cfg, const NumaTopo& topo, int node_index) {
 #ifdef __linux__
   #ifdef HAVE_LIBNUMA
     if (!g_have_numa || !cfg.enabled) return;
@@ -95,7 +95,7 @@ void numa_set_thread_mem_policy(const NumaConfig& cfg, const NumaTopo& topo, int
 #endif
 }
 
-void* numa_alloc(size_t bytes, const NumaConfig& cfg, const NumaTopo& topo, int node_index) {
+void* numa_alloc_portable(size_t bytes, const NumaConfig& cfg, const NumaTopo& topo, int node_index) {
 #ifdef __linux__
   #ifdef HAVE_LIBNUMA
     if (g_have_numa && cfg.enabled && cfg.policy == NumaPolicy::LOCAL) {
@@ -121,10 +121,10 @@ void* numa_alloc(size_t bytes, const NumaConfig& cfg, const NumaTopo& topo, int 
   return p;
 }
 
-void  numa_free(void* p, size_t /*bytes*/) {
+void  numa_free_portable(void* p, size_t bytes) {
 #ifdef __linux__
   #ifdef HAVE_LIBNUMA
-    if (g_have_numa && p) { numa_free(p); return; }
+    if (g_have_numa && p) { ::numa_free(p, bytes); return; }
   #endif
 #endif
   std::free(p);

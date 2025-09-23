@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <vector>
 
 struct Bloom2 {
   uint64_t m_bits=0; int k=0; uint64_t n_items=0;

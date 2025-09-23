@@ -239,12 +239,12 @@ int run_bsgs_mt(const BsgsMtOptions& opt){
   // --- Build per-node resources (replicate baby & sets) ---
   std::vector<NodeResources> res(nodes.size());
   for(size_t ni=0; ni<nodes.size(); ++ni){
-    numa_set_thread_mem_policy(ncfg, topo, nodes[ni].node);
+    numa_set_thread_mem_policy_portable(ncfg, topo, nodes[ni].node);
     res[ni].node = nodes[ni].node; res[ni].m = opt.baby_size;
 
     // Baby table
     size_t bytes = opt.baby_size * sizeof(Point);
-    res[ni].baby = (Point*)numa_alloc(bytes, ncfg, topo, nodes[ni].node);
+    res[ni].baby = (Point*)numa_alloc_portable(bytes, ncfg, topo, nodes[ni].node);
     res[ni].baby_bytes = bytes;
     build_baby_table(res[ni].baby, opt.baby_size, secp);
 
@@ -280,6 +280,6 @@ int run_bsgs_mt(const BsgsMtOptions& opt){
   for(auto& th: pool) th.join();
 
   // Cleanup
-  for(auto& R: res){ if (R.baby) numa_free(R.baby, R.baby_bytes); }
+  for(auto& R: res){ if (R.baby) numa_free_portable(R.baby, R.baby_bytes); }
   return 0;
 }

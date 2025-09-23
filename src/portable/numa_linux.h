@@ -10,9 +10,9 @@ struct NumaTopo { bool available=false; int max_node=0; std::vector<NumaCpuSet> 
 struct NumaConfig { bool enabled=false; NumaPolicy policy=NumaPolicy::LOCAL; std::vector<int> restrict_nodes; bool hugepages=false; };
 
 NumaTopo numa_discover();
-void numa_set_thread_mem_policy(const NumaConfig& cfg, const NumaTopo& topo, int node_index);
-void* numa_alloc(size_t bytes, const NumaConfig& cfg, const NumaTopo& topo, int node_index);
-void  numa_free(void* p, size_t bytes);
+void  numa_set_thread_mem_policy_portable(const NumaConfig& cfg, const NumaTopo& topo, int node_index);
+void* numa_alloc_portable(size_t bytes, const NumaConfig& cfg, const NumaTopo& topo, int node_index);
+void  numa_free_portable(void* p, size_t bytes);
 bool  pin_thread_to_cpu(int cpu);
 bool  pin_thread_to_node_cpu(const NumaCpuSet& cs, int thread_index);
 std::vector<int> parse_nodes_list(const std::string& s);

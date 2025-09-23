@@ -18,6 +18,7 @@ email: albertobsd@gmail.com
 #include "bloom/bloom.h"
 #include "sha3/sha3.h"
 #include "util.h"
+#include <inttypes.h>
 
 #include "secp256k1/SECP256k1.h"
 #include "secp256k1/Point.h"
