@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <algorithm>
+#include <cstring>
 
 #include "portable/portable.h"
 #include "portable/numa_linux.h"
@@ -60,7 +61,7 @@ static bool parse_hex_u256(const std::string& hex, Int &out) {
   }
   if (nybble==1) { buf[bi--] = byte; }
   // Set Int from bytes (big-endian)
-  out.CLEAR();
+  out.SetInt32(0);
   for (int k=0;k<32;k++) out.SetByte(31-k, buf[k]); // Int has SetByte(index, value)
   return true;
 }
