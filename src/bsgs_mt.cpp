@@ -271,6 +271,53 @@ static void worker_bsgs(const WorkerJob& job){
   }
 }
 
+// Big-range worker: i_begin is full-precision (Int), we iterate "count" times.
+// base = (i_begin)*M, then for each step: check block of baby[j], base += M.
+static void worker_bsgs_big(const NodeResources& R,
+                            const Int& i_begin,
+                            uint64_t count,
+                            int block,
+                            Secp256K1& secp) {
+  const uint64_t m = R.m;
+
+  // Precompute stride M = m*G once here (cheap compared to the loop).
+  Int mInt((uint64_t)m);
+  Point M = secp.ScalarMultiplication(secp.G, &mInt);
+
+  // base = i_begin * M
+  Point base = secp.ScalarMultiplication(M, const_cast<Int*>(&i_begin));
+
+  std::vector<uint8_t> buf(33);
+  for (uint64_t step = 0; step < count; ++step) {
+    uint64_t j = 0;
+    while (j < m) {
+      int n = (int)std::min<uint64_t>(block, m - j);
+
+      for (int t=0; t<n; ++t) {
+        Point P = secp.Add(base, R.baby[j+t]);
+
+        // serialize compressed
+        serialize_pub33(P, buf.data(), secp);
+
+        // membership
+        bool ok = true;
+        if (R.pre.idx[0].len) ok = R.pre.maybe(buf.data());
+        if (!ok) continue;
+        if (R.use_bloom && !bloom2_maybe(R.bloom, buf.data())) continue;
+        if (R.use_exact && !R.exact.contains(buf.data())) continue;
+
+        // Optional: low 64-bit report remains illustrative only.
+        printf("HIT: (big) pub[0]=%02x\n", buf[0]);
+        fflush(stdout);
+      }
+      j += n;
+    }
+
+    // Next giant step
+    base = secp.Add(base, M);
+  }
+}
+
 // Public entry (call from your CLI)
 int run_bsgs_mt(const BsgsMtOptions& opt){
   // --- Init ECC ---
@@ -316,29 +363,14 @@ int run_bsgs_mt(const BsgsMtOptions& opt){
   Int q0(K0); Int r0; q0.Div(&mInt, &r0); // q0 = floor(K0/m), r0 = K0 % m
   Int q1(K1); Int r1; q1.Div(&mInt, &r1); // q1 = floor(K1/m), r1 = K1 % m
 
-  // For practicality we assume q1-q0 fits in uint64_t for one run. Chunk if needed.
-  // Extract low 64-bit of q0 and q1 (your Int exposes Get32Bytes; do a quick extraction)
-  auto u64_from_Int = [](const Int& x)->uint64_t {
-    // Little helper using Get32Bytes as used in SECP256K1.cpp
-    uint8_t b[32]; const_cast<Int&>(x).Get32Bytes(b);
-    uint64_t v=0; for(int i=24;i<32;i++) v = (v<<8) | b[i];
-    return v;
-  };
-  uint64_t i0 = u64_from_Int(q0);
-  uint64_t i1 = u64_from_Int(q1);
-  if (i1 < i0) { fprintf(stderr,"[bsgs-mt] empty range\n"); return 0; }
-  int total_threads = (opt.threads > 0) ? opt.threads : cpu_count();
-  fprintf(stderr, "[bsgs-mt] starting giant steps: i in [%llu, %llu), block=%d, threads=%d\n",
-          (unsigned long long)i0, (unsigned long long)i1, opt.block_size, total_threads);
-
-  // --- Build per-node resources (replicate baby & sets) ---
+    // --- Build per-node resources (replicate baby & sets) ---
   std::vector<NodeResources> res(nodes.size());
-  // Build once on the first node, then memcpy to others
   size_t bytes_all = opt.baby_size * sizeof(Point);
   fprintf(stderr, "[bsgs-mt] sizeof(Point)=%zu, baby m=%llu, per-node bytes=%.2f GiB\n",
           sizeof(Point), (unsigned long long)opt.baby_size, bytes_all / (1024.0*1024.0*1024.0));
+
   Point* first_baby = nullptr;
-  for (size_t ni=0; ni<nodes.size(); ++ni) {
+  for(size_t ni=0; ni<nodes.size(); ++ni){
     numa_set_thread_mem_policy_portable(ncfg, topo, nodes[ni].node);
     res[ni].node = nodes[ni].node; res[ni].m = opt.baby_size;
 
@@ -347,7 +379,6 @@ int run_bsgs_mt(const BsgsMtOptions& opt){
 
     if (ni == 0) {
       int build_threads = std::max(1, (opt.threads>0 ? opt.threads : cpu_count()) / (int)nodes.size());
-      build_threads = std::max(1, build_threads);
       fprintf(stderr, "[bsgs-mt] building baby table on node %d with %d threads...\n",
               nodes[ni].node, build_threads);
       build_baby_table_mt(res[ni].baby, opt.baby_size, build_threads);
@@ -358,7 +389,6 @@ int run_bsgs_mt(const BsgsMtOptions& opt){
       std::memcpy(res[ni].baby, first_baby, bytes_all);
     }
 
-    // build membership per node (unchanged)
     if (opt.filter_kind=="bloom") {
       res[ni].use_bloom=true; res[ni].use_exact=false;
       bloom2_init(res[ni].bloom, targets33.size()/33, opt.bloom_fpp);
@@ -370,24 +400,82 @@ int run_bsgs_mt(const BsgsMtOptions& opt){
     }
   }
 
-  // --- Dispatch threads across nodes ---
-  std::vector<std::thread> pool;
-  for(size_t ni=0; ni<nodes.size(); ++ni){
-    auto& g = nodes[ni]; auto& R = res[ni];
-    int nthr = (int)g.cpus.size(); if (opt.threads>0) nthr = std::min(nthr, opt.threads/(int)nodes.size());
-    if (nthr<=0) nthr = 1;
-    uint64_t span = (i1 - i0 + 1);
-    for(int t=0;t<nthr;t++){
-      uint64_t tb = i0 + (span * t)/nthr;
-      uint64_t te = i0 + (span * (t+1))/nthr;
-      pool.emplace_back([&, ni, t, tb, te]{
-        pin_thread_to_node_cpu(nodes[ni], t);
-        WorkerJob job; job.R=&R; job.i_begin=tb; job.i_end=te; job.block=opt.block_size; job.secp=&secp;
-        worker_bsgs(job);
-      });
+  // --- Decide scheduling path: 64-bit fast path vs. big-range chunking ---
+  uint64_t i0_64, i1_64;
+  bool q0_fit = int_to_u64_exact(q0, i0_64);
+  bool q1_fit = int_to_u64_exact(q1, i1_64);
+
+  int total_threads = (opt.threads > 0) ? opt.threads : cpu_count();
+
+  if (q0_fit && q1_fit && i1_64 >= i0_64) {
+    // ===== Fast path: whole span fits in uint64_t =====
+    fprintf(stderr, "[bsgs-mt] starting giant steps (u64): i in [%llu, %llu), block=%d, threads=%d\n",
+            (unsigned long long)i0_64, (unsigned long long)i1_64 + 1ULL, opt.block_size, total_threads);
+
+    std::vector<std::thread> pool;
+    for(size_t ni=0; ni<nodes.size(); ++ni){
+      const auto& R = res[ni];
+      uint64_t span = (i1_64 - i0_64 + 1ULL); // guaranteed non-zero here
+
+      for (int t=0; t<total_threads; ++t) {
+        uint64_t tb = i0_64 + (span * (uint64_t)t)/ (uint64_t)total_threads;
+        uint64_t te = i0_64 + (span * (uint64_t)(t+1))/ (uint64_t)total_threads;
+        pool.emplace_back([&, ni, tb, te]{
+          pin_thread_to_node_cpu(nodes[ni], t);
+          WorkerJob job; job.R=&R; job.i_begin=tb; job.i_end=te; job.block=opt.block_size; job.secp=&secp;
+          worker_bsgs(job);
+        });
+      }
+    }
+    for (auto& th: pool) th.join();
+  } else {
+    // ===== Big path: stream the span in 64-bit CHUNKS =====
+    const uint64_t CHUNK = (1ULL<<32);  // ~4 billion giant steps per outer iteration
+    Int cur(q0);
+
+    // Compute remaining = q1 - cur + 1 as Int
+    auto remaining_Int = [&](Int& out){
+      out.Sub(&q1, &cur);     // out = q1 - cur
+      out.Add((uint64_t)1);   // out += 1
+    };
+
+    while (true) {
+      Int rem; remaining_Int(rem);
+      // if rem == 0 => done
+      if (rem.IsZero()) break;
+
+      // this_chunk = min(rem, CHUNK)
+      uint64_t rem64 = u64_lo_from_Int(rem);
+      uint64_t this_chunk = rem64 ? std::min<uint64_t>(rem64, CHUNK) : CHUNK;
+
+      fprintf(stderr, "[bsgs-mt] chunk start (big): i = cur, count = %llu\n",
+              (unsigned long long)this_chunk);
+
+      std::vector<std::thread> pool;
+      for(size_t ni=0; ni<nodes.size(); ++ni){
+        const auto& R = res[ni];
+        for (int t=0; t<total_threads; ++t) {
+          uint64_t tb = (this_chunk * (uint64_t)t)    / (uint64_t)total_threads;
+          uint64_t te = (this_chunk * (uint64_t)(t+1))/ (uint64_t)total_threads;
+          uint64_t cnt = (te > tb) ? (te - tb) : 0;
+          if (!cnt) continue;
+
+          // i_begin_big = cur + tb
+          Int i_begin_big(cur);
+          i_begin_big.Add(tb);
+
+          pool.emplace_back([&, ni, i_begin_big, cnt, t]{
+            pin_thread_to_node_cpu(nodes[ni], t);
+            worker_bsgs_big(res[ni], i_begin_big, cnt, opt.block_size, secp);
+          });
+        }
+      }
+      for (auto& th: pool) th.join();
+
+      // advance cur += this_chunk
+      cur.Add(this_chunk);
     }
   }
-  for(auto& th: pool) th.join();
 
   // Cleanup
   for(auto& R: res){ if (R.baby) numa_free_portable(R.baby, R.baby_bytes); }
