@@ -45,6 +45,30 @@ keyhunt.exe -m bsgs-mt -f pubkeys.txt -r <start:end> -t 24 -J 268435456 -W 8192 
 
 These flags are in addition to the usual ones (-f, -r, -t, …).
 
+## What the parameters do
+### Baby table size m (-J)
+- Builds m points B[j] = j·G (Jacobian points normalized when serialized).
+- Larger m → fewer giant steps → less per-step work, but more RAM.
+- Memory for baby table: m × sizeof(Point) bytes per NUMA node (replicated).
+- Practical guidance on a 128 GB dual-socket host:
+-- Start with -J 268435456 (2^28). If RAM is tight (exact set also large), try 2^27.
+
+### Block size -W
+- Batches n consecutive j steps to keep data hot in cache and amortize overhead.
+- 8192 works well for most CPUs; tune 4096–16384.
+
+### Membership backend -Y
+- tag+exact (default):
+-- Prefilter: 65,536 buckets × 1-byte tag (fast negative tests).
+-- Exact set: Open-addressed hash + embedded 33-byte pubkey blob.
+-- RAM ≈ ~53 bytes × N_targets (breakdown below).
+
+- bloom:
+-- RAM ≈ bits_per_item × N / 8, where
+-- bits_per_item = -ln(FPP) / (ln2^2) ≈ 1.44 × log2(1/FPP).
+-- With -P 1e-9, that’s ≈ 43 bits/key ≈ 5.4 bytes/key.
+
+
 # keyhunt
 
 Tool for hunt privatekeys for crypto currencies that use secp256k1 elliptic curve
