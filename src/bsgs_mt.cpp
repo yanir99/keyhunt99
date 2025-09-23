@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <algorithm>
 #include <cstring>
+#include <cctype>
+#include <cstring>
 
 #include "portable/portable.h"
 #include "portable/numa_linux.h"
@@ -66,26 +68,75 @@ static bool parse_hex_u256(const std::string& hex, Int &out) {
   return true;
 }
 
-static void read_targets_as_compressed33(const std::string& path, std::vector<uint8_t>& out33, Secp256K1& secp) {
+static void read_targets_as_compressed33(const std::string& path,
+                                         std::vector<uint8_t>& out33,
+                                         Secp256K1& secp) {
+  (void)secp; // not needed; keep to silence -Wunused-parameter
   FILE* f = fopen(path.c_str(), "rb");
-  if(!f){ fprintf(stderr,"[bsgs-mt] cannot open targets file\n"); return; }
-  char line[256];
+  if(!f){
+    fprintf(stderr,"[bsgs-mt] cannot open targets file: %s\n", path.c_str());
+    return;
+  }
+  char line[512];
   while (fgets(line, sizeof(line), f)) {
-    char* p=line; while(*p==' '||*p=='\t') ++p;
-    int L=0; while(p[L] && p[L]!='\r' && p[L]!='\n') ++L; p[L]=0;
-    if (L<2) continue;
-    // Accept 33B or 65B hex
-    auto hexv=[&](char c){ if(c>='0'&&c<='9')return c-'0'; if(c>='a'&&c<='f')return c-'a'+10; if(c>='A'&&c<='F')return c-'A'+10; return 0; };
-    if ((L==66 && (p[0]=='0'?(p[1]=='2'||p[1]=='3'):(p[0]=='2'||p[0]=='3'))) ||
-        (L==130 && (p[0]=='0'?p[1]=='4':p[0]=='4'))) {
-      std::vector<uint8_t> tmp(L/2);
-      for (int i=0;i<L;i+=2) tmp[i/2] = (uint8_t)((hexv(p[i])<<4)|hexv(p[i+1]));
-      if (tmp.size()==33) out33.insert(out33.end(), tmp.begin(), tmp.end());
-      else if (tmp.size()==65 && tmp[0]==0x04) {
-        // compress: 02/03 || X
-        uint8_t out[33]; out[0] = (tmp[64] & 1) ? 0x03 : 0x02; std::memcpy(out+1, &tmp[1], 32);
-        out33.insert(out33.end(), out, out+33);
-      }
+    // 1) chop comment starting at '#'
+    char* hash = std::strchr(line, '#');
+    if (hash) *hash = '\0';
+
+    // 2) trim trailing whitespace/newlines
+    size_t L = std::strlen(line);
+    while (L && std::isspace((unsigned char)line[L-1])) line[--L] = '\0';
+
+    // 3) skip leading whitespace
+    char* p = line;
+    while (*p && std::isspace((unsigned char)*p)) ++p;
+
+    // 4) empty after trimming => skip
+    if (*p == '\0') continue;
+
+    // 5) now p should be the hex pubkey token; measure its length to first space (if any)
+    char* ws = p;
+    while (*ws && !std::isspace((unsigned char)*ws)) ++ws;
+    *ws = '\0';
+    L = std::strlen(p);
+
+    // 6) accept only 66 (compressed 02/03) or 130 (uncompressed 04) hex chars
+    if (!(L == 66 || L == 130)) continue;
+
+    auto ishex = [](char c)->bool {
+      return (c>='0'&&c<='9')||(c>='a'&&c<='f')||(c>='A'&&c<='F');
+    };
+    bool allhex = true; for (size_t i=0;i<L;i++) if (!ishex(p[i])) { allhex=false; break; }
+    if (!allhex) continue;
+
+    auto hexv = [](char c)->uint8_t {
+      if (c>='0'&&c<='9') return (uint8_t)(c-'0');
+      if (c>='a'&&c<='f') return (uint8_t)(c-'a'+10);
+      return (uint8_t)(c-'A'+10);
+    };
+
+    if (L == 66) {
+      // compressed must start with 02 or 03
+      if (!(p[0]=='0' && (p[1]=='2'||p[1]=='3')) &&
+          !(p[0]=='2' || p[0]=='3')) continue;
+
+      uint8_t out[33];
+      for (size_t i=0;i<66;i+=2)
+        out[i/2] = (uint8_t)((hexv(p[i])<<4)|hexv(p[i+1]));
+      out33.insert(out33.end(), out, out+33);
+    } else {
+      // uncompressed must start with 04
+      if (!((p[0]=='0'&&p[1]=='4') || p[0]=='4')) continue;
+
+      uint8_t tmp[65];
+      for (size_t i=0;i<130;i+=2)
+        tmp[i/2] = (uint8_t)((hexv(p[i])<<4)|hexv(p[i+1]));
+
+      // compress: 02/03 || X[32]
+      uint8_t out[33];
+      out[0] = (tmp[64] & 1) ? 0x03 : 0x02;  // parity(Y)
+      std::memcpy(out+1, &tmp[1], 32);       // copy X
+      out33.insert(out33.end(), out, out+33);
     }
   }
   fclose(f);
