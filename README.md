@@ -51,7 +51,7 @@ These flags are in addition to the usual ones (-f, -r, -t, …).
 - Larger m → fewer giant steps → less per-step work, but more RAM.
 - Memory for baby table: m × sizeof(Point) bytes per NUMA node (replicated).
 - Practical guidance on a 128 GB dual-socket host:
--- Start with -J 268435456 (2^28). If RAM is tight (exact set also large), try 2^27.
+- - Start with -J 268435456 (2^28). If RAM is tight (exact set also large), try 2^27.
 
 ### Block size -W
 - Batches n consecutive j steps to keep data hot in cache and amortize overhead.
