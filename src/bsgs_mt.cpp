@@ -20,6 +20,8 @@
 #include "../secp256k1/Point.h"
 #include "../secp256k1/Int.h"
 
+static inline void serialize_pub33(const Point& P, uint8_t out[33], Secp256K1& secp);
+
 // ---------------- CLI options struct ----------------
 struct BsgsMtOptions {
   std::string targets_path;
@@ -364,7 +366,8 @@ static void worker_bsgs_big(const NodeResources& R,
   Point base = secp.ScalarMultiplication(M, const_cast<Int*>(&i_begin));
 
   std::vector<uint8_t> buf(33);
-  Int i_cur(i_begin);
+  Int i_cur; 
+  i_cur.Set(const_cast<Int*>(&i_begin));
 
   for (uint64_t step = 0; step < count; ++step) {
     // negbase = -base
@@ -379,9 +382,12 @@ static void worker_bsgs_big(const NodeResources& R,
       if (!R.baby_map.find(buf.data(), j)) continue;
 
       // Candidate k = i*m + j; check bounds (K0 <= k <= K1)
-      Int k = i_cur; k.Mul(&const_cast<Int&>(mInt)); k.Add((uint64_t)j);
-      if (k.Cmp(&const_cast<Int&>(K0)) < 0) continue;
-      if (k.Cmp(&const_cast<Int&>(K1)) > 0) continue;
+      Int k; k.Set(const_cast<Int*>(&i_cur));         // copy i_cur
+      k.Mult(const_cast<Int*>(&mInt));                // k = i_cur * m
+      k.Add((uint64_t)j);                             // k += j
+
+      if (k.IsLower(const_cast<Int*>(&K0)))   continue;
+      if (k.IsGreater(const_cast<Int*>(&K1))) continue;
 
       // Report (print compressed pubkey head + j low bits for debugging)
       printf("HIT: j=%u  pub[0]=%02x\n", j, buf[0]);
