@@ -1,3 +1,50 @@
+# Added BSGS-MT (Multi-Target) Mode
+
+bsgs-mt is a high-throughput Baby-Step/Giant-Step enumerator optimized for millions of public keys. It precomputes a baby table B[j] = j·G, then walks giant steps i·(m·G) and checks points P = i·(m·G) + B[j] against your target set using CPU-cache-friendly membership structures.
+
+## Highlights
+Designed for huge target sets (≥ 1M compressed pubkeys).
+Two membership backends:
+tag+exact (default): near-zero false positives; fastest confirmation; RAM-heavy.
+bloom: lower memory footprint; very low but non-zero FPP; best when RAM is scarce.
+NUMA-aware on Linux: per-node replication and CPU pinning for dual-socket boxes.
+Builds on Linux and MinGW64/Windows (NUMA flags become no-ops on Windows).
+
+## Quick Start
+
+...
+./keyhunt -m bsgs-mt -f pubkeys.txt -r 4000000000000000000000000000000000:7fffffffffffffffffffffffffffffffff -t 28 -J 268435456 W 8192 -Y tag+exact -U auto -L local -H off
+...
+
+- pubkeys.txt: one hex pubkey per line. Accepts 33-byte compressed (02… / 03…) or 65-byte uncompressed (04…). Uncompressed inputs are internally compressed.
+- -r start:end: 256-bit hex range (inclusive).
+- -J 268435456: m (baby table size) = 2^28 rows.
+- -Y tag+exact: fastest exact membership; use -Y bloom + -P 1e-9 if RAM is tight.
+
+Windows/MinGW64 example (NUMA flags ignored safely):
+...
+keyhunt.exe -m bsgs-mt -f pubkeys.txt -r <start:end> -t 24 -J 268435456 -W 8192 -Y tag+exact
+...
+
+## CLI Reference
+
+| Flag             | Meaning                                                             | Default                   |       |
+| ---------------- | ------------------------------------------------------------------- | ------------------------- | ----- |
+| `-m bsgs-mt`     | Enable multi-target BSGS mode                                       | —                         |       |
+| `-f <file>`      | Targets file (one pubkey/line; 02/03/04 hex)                        | required                  |       |
+| `-r <start:end>` | 256-bit hex range (inclusive)                                       | required                  |       |
+| `-t <threads>`   | Total threads (across all NUMA nodes)                               | `hw_concurrency`          |       |
+| `-J <m>`         | Baby table size **m** (absolute integer, e.g. `268435456` for 2^28) | `268435456`               |       |
+| `-W <n>`         | Inner block size for batching point ops                             | `8192`                    |       |
+| `-Y <kind>`      | Membership: `tag+exact` \| `bloom`                                  | `tag+exact`               |       |
+| `-P <p>`         | Bloom false-positive prob (if `-Y bloom`)                           | `1e-9`                    |       |
+| `-U <mode>`      | NUMA strategy (Linux): `auto` \| `off` \| `nodes=0,1`               | `auto`                    |       |
+| `-L <policy>`    | NUMA memory policy (Linux): `local` \| `interleave`                 | `local`                   |       |
+| \`-H \<on        | off>\`                                                              | Hugepages madvise (Linux) | `off` |
+
+
+These flags are in addition to the usual ones (-f, -r, -t, …).
+
 # keyhunt
 
 Tool for hunt privatekeys for crypto currencies that use secp256k1 elliptic curve
