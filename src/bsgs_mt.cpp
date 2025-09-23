@@ -154,18 +154,61 @@ struct NodeResources {
   bool use_exact=true, use_bloom=false;
 };
 
-// Build baby table with NextKey (fast G additions inside your lib)
-static void build_baby_table(Point* B, uint64_t m, Secp256K1& secp){
-  // B[0] = Infinity (identity)
-  B[0].Clear();
-  if (m==1) return;
-  B[1] = secp.G;
-  Point p = B[1];
-  for (uint64_t j=2;j<m;j++){
-    p = secp.NextKey(p);   // p = p + G
-    B[j] = p;
+// Multithreaded baby-table build:
+// Split [0..m) into T chunks. Each thread t:
+//   j0 = t * chunk; P0 = j0*G (scalar mult once), then fill chunk via NextKey.
+// Prints periodic progress so it doesn't look "hung".
+static void build_baby_table_mt(Point* B, uint64_t m, int threads) {
+  if (m == 0) return;
+  if (threads < 1) threads = 1;
+
+  // Progress
+  std::atomic<uint64_t> done{0};
+  const uint64_t report_every = (m >= (1u<<26)) ? (1u<<22) : (1u<<20); // every ~4M or 1M
+
+  auto worker = [&](uint64_t j0, uint64_t len){
+    Secp256K1 secp_local; secp_local.Init();
+
+    // P0 = j0 * G
+    Int j0Int((uint64_t)j0);
+    Point P0 = secp_local.ScalarMultiplication(secp_local.G, &j0Int);
+
+    // fill B[j] = P0; P0 += G
+    for (uint64_t k=0; k<len; ++k) {
+      B[j0+k] = P0;
+      P0  = secp_local.NextKey(P0);
+      uint64_t d = ++done;
+      if ((d % report_every) == 0) {
+        double pct = (100.0 * d) / (double)m;
+        fprintf(stderr, "[bsgs-mt] baby build: %.1f%% (%llu/%llu)\r",
+                pct, (unsigned long long)d, (unsigned long long)m);
+        fflush(stderr);
+      }
+    }
+  };
+
+  // Partition
+  uint64_t chunk = (m + (uint64_t)threads - 1) / (uint64_t)threads;
+  if (chunk == 0) chunk = m;
+
+  // Launch
+  std::vector<std::thread> th;
+  th.reserve(threads);
+  fprintf(stderr, "[bsgs-mt] starting giant steps: i in [%llu, %llu), block=%d, threads=%d\n",
+        (unsigned long long)i0, (unsigned long long)i1, opt.block_size,
+        (opt.threads>0?opt.threads:cpu_count()));
+  for (int t=0; t<threads; ++t) {
+    uint64_t j0 = (uint64_t)t * chunk;
+    if (j0 >= m) break;
+    uint64_t len = std::min<uint64_t>(chunk, m - j0);
+    th.emplace_back(worker, j0, len);
   }
+  for (auto& x : th) x.join();
+
+  fprintf(stderr, "\n[bsgs-mt] baby build: 100%% (%llu/%llu)\n",
+          (unsigned long long)m, (unsigned long long)m);
 }
+
 
 // Serialize compressed (33B) using your lib (handles affine normalization internally)
 static inline void serialize_pub33(const Point& P, uint8_t out[33], Secp256K1& secp){
@@ -240,6 +283,7 @@ int run_bsgs_mt(const BsgsMtOptions& opt){
   std::vector<uint8_t> targets33; targets33.reserve(1<<20);
   read_targets_as_compressed33(opt.targets_path, targets33, secp);
   if (targets33.empty()){ fprintf(stderr,"[bsgs-mt] no targets loaded\n"); return 1; }
+  fprintf(stderr, "[bsgs-mt] loaded %zu targets (compressed 33B)\n", targets33.size()/33);
 
   // --- NUMA topo ---
   NumaTopo topo = numa_discover();
@@ -289,17 +333,32 @@ int run_bsgs_mt(const BsgsMtOptions& opt){
 
   // --- Build per-node resources (replicate baby & sets) ---
   std::vector<NodeResources> res(nodes.size());
-  for(size_t ni=0; ni<nodes.size(); ++ni){
+  // Build once on the first node, then memcpy to others
+  size_t bytes_all = opt.baby_size * sizeof(Point);
+  fprintf(stderr, "[bsgs-mt] sizeof(Point)=%zu, baby m=%llu, per-node bytes=%.2f GiB\n",
+          sizeof(Point), (unsigned long long)opt.baby_size, bytes_all / (1024.0*1024.0*1024.0));
+  Point* first_baby = nullptr;
+  for (size_t ni=0; ni<nodes.size(); ++ni) {
     numa_set_thread_mem_policy_portable(ncfg, topo, nodes[ni].node);
     res[ni].node = nodes[ni].node; res[ni].m = opt.baby_size;
 
-    // Baby table
-    size_t bytes = opt.baby_size * sizeof(Point);
-    res[ni].baby = (Point*)numa_alloc_portable(bytes, ncfg, topo, nodes[ni].node);
-    res[ni].baby_bytes = bytes;
-    build_baby_table(res[ni].baby, opt.baby_size, secp);
+    res[ni].baby = (Point*)numa_alloc_portable(bytes_all, ncfg, topo, nodes[ni].node);
+    res[ni].baby_bytes = bytes_all;
 
-    // Membership
+    if (ni == 0) {
+      int build_threads = std::max(1, (opt.threads>0 ? opt.threads : cpu_count()) / (int)nodes.size());
+      build_threads = std::max(1, build_threads);
+      fprintf(stderr, "[bsgs-mt] building baby table on node %d with %d threads...\n",
+              nodes[ni].node, build_threads);
+      build_baby_table_mt(res[ni].baby, opt.baby_size, build_threads);
+      first_baby = res[ni].baby;
+    } else {
+      fprintf(stderr, "[bsgs-mt] replicating baby table to node %d (%.2f GiB memcpy)...\n",
+              nodes[ni].node, bytes_all / (1024.0*1024.0*1024.0));
+      std::memcpy(res[ni].baby, first_baby, bytes_all);
+    }
+
+    // build membership per node (unchanged)
     if (opt.filter_kind=="bloom") {
       res[ni].use_bloom=true; res[ni].use_exact=false;
       bloom2_init(res[ni].bloom, targets33.size()/33, opt.bloom_fpp);
