@@ -164,6 +164,56 @@ static void read_targets_as_compressed33(const std::string& path,
   fclose(f);
 }
 
+// --- BabyMap: open-addressing hash for 33-byte compressed points -> j index ---
+struct BabyMap {
+  std::vector<uint8_t> keys;    // concatenated 33B keys, length = 33*m
+  std::vector<uint32_t> table;  // slot -> (j+1), 0 = empty
+  uint32_t m = 0, cap = 0, mask = 0;
+
+  static inline uint64_t h64(const uint8_t* p, int len=33) {
+    // FNV-1a 64-bit
+    uint64_t h = 1469598103934665603ull;
+    for (int i=0;i<len;i++){ h ^= p[i]; h *= 1099511628211ull; }
+    return h;
+  }
+
+  void build(Point* babies, uint32_t M, Secp256K1& secp) {
+    m = M;
+    // capacity ~ 1.25*m rounded to power of two
+    uint64_t want = (uint64_t)( (double)m * 1.25 );
+    uint32_t pow2 = 1u; while ((uint64_t)pow2 < want) pow2 <<= 1;
+    cap = pow2; mask = cap - 1;
+
+    keys.resize( (size_t)m * 33 );
+    table.assign( cap, 0 );
+
+    // Serialize and insert
+    uint8_t buf[33];
+    for (uint32_t j=0; j<m; ++j) {
+      serialize_pub33(babies[j], buf, secp);
+      std::memcpy(&keys[(size_t)j*33], buf, 33);
+
+      uint64_t h = h64(buf);
+      uint32_t pos = (uint32_t)(h & mask);
+      while (table[pos] != 0) { pos = (pos+1) & mask; }
+      table[pos] = j + 1;
+    }
+  }
+
+  // Returns true and sets j if found; else false.
+  bool find(const uint8_t* key, uint32_t& j_out) const {
+    uint64_t h = h64(key);
+    uint32_t pos = (uint32_t)(h & mask);
+    while (true) {
+      uint32_t v = table[pos];
+      if (v == 0) return false;
+      uint32_t j = v - 1;
+      if (std::memcmp(&keys[(size_t)j*33], key, 33) == 0) { j_out = j; return true; }
+      pos = (pos + 1) & mask;
+    }
+  }
+};
+
 // ---------------- NUMA resources per node ----------------
 struct NodeResources {
   int node=0;
@@ -174,6 +224,7 @@ struct NodeResources {
   ExactSet exact;
   Bloom2 bloom;
   bool use_exact=true, use_bloom=false;
+  BabyMap baby_map;        // NEW: hash of babies for Q = P - i·M lookups
 };
 
 // Multithreaded baby-table build:
@@ -298,45 +349,54 @@ static void worker_bsgs(const WorkerJob& job){
 static void worker_bsgs_big(const NodeResources& R,
                             const Int& i_begin,
                             uint64_t count,
-                            int block,
-                            Secp256K1& secp) {
-  const uint64_t m = R.m;
+                            int block,         // unused now; keep signature
+                            Secp256K1& /*secp_shared*/,
+                            const std::vector<Point>& targetsP,
+                            const Int& K0, const Int& K1, const Int& mInt) {
+  // Thread-local EC (safer than sharing)
+  Secp256K1 secp; secp.Init();
 
-  // Precompute stride M = m*G once here (cheap compared to the loop).
-  Int mInt((uint64_t)m);
-  Point M = secp.ScalarMultiplication(secp.G, &mInt);
+  const uint64_t m = R.m;
+  // stride M = m*G
+  Point M = secp.ScalarMultiplication(secp.G, const_cast<Int*>(&mInt));
 
   // base = i_begin * M
   Point base = secp.ScalarMultiplication(M, const_cast<Int*>(&i_begin));
 
   std::vector<uint8_t> buf(33);
+  Int i_cur(i_begin);
+
   for (uint64_t step = 0; step < count; ++step) {
-    uint64_t j = 0;
-    while (j < m) {
-      int n = (int)std::min<uint64_t>(block, m - j);
+    // negbase = -base
+    Point negbase = secp.Negation(base);
 
-      for (int t=0; t<n; ++t) {
-        Point P = secp.Add(base, R.baby[j+t]);
+    // For each target, compute Q = target - base, lookup in baby map
+    for (const Point& T : targetsP) {
+      Point Q = secp.Add(const_cast<Point&>(T), negbase);
+      serialize_pub33(Q, buf.data(), secp);
 
-        // serialize compressed
-        serialize_pub33(P, buf.data(), secp);
+      uint32_t j = 0;
+      if (!R.baby_map.find(buf.data(), j)) continue;
 
-        // membership
-        bool ok = true;
-        if (R.pre.idx[0].len) ok = R.pre.maybe(buf.data());
-        if (!ok) continue;
-        if (R.use_bloom && !bloom2_maybe(R.bloom, buf.data())) continue;
-        if (R.use_exact && !R.exact.contains(buf.data())) continue;
+      // Candidate k = i*m + j; check bounds (K0 <= k <= K1)
+      Int k = i_cur; k.Mul(&const_cast<Int&>(mInt)); k.Add((uint64_t)j);
+      if (k.Cmp(&const_cast<Int&>(K0)) < 0) continue;
+      if (k.Cmp(&const_cast<Int&>(K1)) > 0) continue;
 
-        // Optional: low 64-bit report remains illustrative only.
-        printf("HIT: (big) pub[0]=%02x\n", buf[0]);
-        fflush(stdout);
-      }
-      j += n;
+      // Report (print compressed pubkey head + j low bits for debugging)
+      printf("HIT: j=%u  pub[0]=%02x\n", j, buf[0]);
+      fflush(stdout);
     }
 
-    // Next giant step
+    // next giant step
     base = secp.Add(base, M);
+    i_cur.Add((uint64_t)1);
+
+    if ((step & ((1u<<20)-1)) == 0) { // every ~1M steps
+      fprintf(stderr, "[bsgs-mt] progress: +%llu steps\n",
+              (unsigned long long)step);
+      fflush(stderr);
+    }
   }
 }
 
@@ -350,7 +410,25 @@ int run_bsgs_mt(const BsgsMtOptions& opt){
   read_targets_as_compressed33(opt.targets_path, targets33, secp);
   if (targets33.empty()){ fprintf(stderr,"[bsgs-mt] no targets loaded\n"); return 1; }
   fprintf(stderr, "[bsgs-mt] loaded %zu targets (compressed 33B)\n", targets33.size()/33);
-
+  
+  // Build Point objects for all targets (compressed 33B -> Point)
+  std::vector<Point> targetsP;
+  targetsP.reserve(targets33.size()/33);
+  {
+    char hex[67]; hex[66] = 0;
+    auto tohex = [&](const uint8_t* in){
+      static const char* H="0123456789abcdef";
+      for (int i=0;i<33;i++){ hex[2*i]=H[in[i]>>4]; hex[2*i+1]=H[in[i]&15]; }
+    };
+    for (size_t off=0; off<targets33.size(); off+=33) {
+      tohex(&targets33[off]);
+      Point P; bool isComp=false;
+      if (!secp.ParsePublicKeyHex(hex, P, isComp)) continue;
+      targetsP.push_back(P);
+    }
+  }
+  fprintf(stderr, "[bsgs-mt] prepared %zu target points\n", targetsP.size());
+  
   // --- NUMA topo ---
   NumaTopo topo = numa_discover();
   NumaConfig ncfg; ncfg.enabled = (opt.numa_mode!="off" && topo.available);
@@ -411,6 +489,9 @@ int run_bsgs_mt(const BsgsMtOptions& opt){
       std::memcpy(res[ni].baby, first_baby, bytes_all);
     }
 
+    fprintf(stderr, "[bsgs-mt] indexing baby table on node %d...\n", nodes[ni].node);
+    res[ni].baby_map.build(res[ni].baby, (uint32_t)opt.baby_size, secp);
+
     if (opt.filter_kind=="bloom") {
       res[ni].use_bloom=true; res[ni].use_exact=false;
       bloom2_init(res[ni].bloom, targets33.size()/33, opt.bloom_fpp);
@@ -442,10 +523,12 @@ int run_bsgs_mt(const BsgsMtOptions& opt){
       for (int t=0; t<total_threads; ++t) {
         uint64_t tb = i0_64 + (span * (uint64_t)t)/ (uint64_t)total_threads;
         uint64_t te = i0_64 + (span * (uint64_t)(t+1))/ (uint64_t)total_threads;
-        pool.emplace_back([&, ni, tb, te]{
+        pool.emplace_back([&, ni, tb, te, t]{
           pin_thread_to_node_cpu(nodes[ni], t);
-          WorkerJob job; job.R=&R; job.i_begin=tb; job.i_end=te; job.block=opt.block_size; job.secp=&secp;
-          worker_bsgs(job);
+          Int i_begin_big; i_begin_big.SetInt32(0); i_begin_big.Add(tb);
+          uint64_t cnt = te - tb;
+          worker_bsgs_big(res[ni], i_begin_big, cnt, opt.block_size, secp,
+                          targetsP, K0, K1, mInt);
         });
       }
     }
@@ -488,7 +571,8 @@ int run_bsgs_mt(const BsgsMtOptions& opt){
 
           pool.emplace_back([&, ni, i_begin_big, cnt, t]{
             pin_thread_to_node_cpu(nodes[ni], t);
-            worker_bsgs_big(res[ni], i_begin_big, cnt, opt.block_size, secp);
+            worker_bsgs_big(res[ni], i_begin_big, cnt, opt.block_size, secp,
+                            targetsP, K0, K1, mInt);
           });
         }
       }
