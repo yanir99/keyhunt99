@@ -1006,6 +1006,8 @@ int main(int argc, char **argv)	{
             opt.numa_mode       = BSGSMT_NUMA;
             opt.numa_policy     = BSGSMT_NUMA_POLICY;
             opt.hugepages       = (BSGSMT_HUGEPAGES != 0);
+			opt.random_mode     = FLAGRANDOM;
+        	opt.random_keys     = N;
 
             // hand off to the new engine and finish the program
             return run_bsgs_mt(opt);

@@ -14,6 +14,8 @@ struct BsgsMtOptions {
   std::string numa_mode;        // "auto" | "off" | "nodes=0,1"
   std::string numa_policy;      // "local" | "interleave"
   bool hugepages;
+  bool random_mode = false;                // from -R
+  unsigned long long random_keys = 0ull;   // from -n (keys per hop)
 };
 
 int run_bsgs_mt(const BsgsMtOptions& opt);

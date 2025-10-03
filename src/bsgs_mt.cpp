@@ -19,28 +19,29 @@
 #include "../secp256k1/SECP256k1.h"
 #include "../secp256k1/Point.h"
 #include "../secp256k1/Int.h"
+#include "bsgs_mt.h"
 
 static inline void serialize_pub33(const Point& P, uint8_t out[33], Secp256K1& secp);
 
-// ---------------- CLI options struct ----------------
-struct BsgsMtOptions {
-  std::string targets_path;
-  std::string range_hex;     // "-r <start:end>" already parsed by your CLI; pass start and end as hex strings or set below fields
-  std::string range_start_hex;
-  std::string range_end_hex;
+// -------- Random 64-bit helper (portable) --------
+#include <random>
+static inline uint64_t rand64() {
+  static thread_local std::mt19937_64 gen{std::random_device{}()};
+  return gen();
+}
 
-  uint64_t    baby_size = (1ull<<26); // m
-  int         block_size=8192;
-  int         threads=0;
-
-  std::string filter_kind="tag+exact";  // or "bloom"
-  double      bloom_fpp=1e-9;
-
-  // NUMA (Linux)
-  std::string numa_mode="auto";         // off|auto|nodes=0,1
-  std::string numa_policy="local";      // local|interleave
-  bool        hugepages=false;
-};
+// Try to get (q1 - q0 + 1) into a u64 span if it fits; otherwise clamp to 2^64-1
+static inline uint64_t span_u64_or_max(const Int& q0, const Int& q1) {
+  Int span(q1);
+  Int one((uint64_t)1);
+  span.Sub(const_cast<Int*>(&q0));  // span = q1 - q0
+  span.Add(&one);                   // span += 1
+  uint64_t out = 0;
+  // Your Int has GetInt64(). If it doesn't fit, we’ll just return max u64.
+  out = (uint64_t)span.GetInt64(); // If overflow returns truncated, that's ok—random start will still vary
+  if (out == 0) out = ~uint64_t(0); // fallback
+  return out;
+}
 
 // --------- Helpers to parse hex -> Int ---------
 static bool parse_hex_u256(const std::string& hex, Int &out) {
@@ -516,6 +517,114 @@ int run_bsgs_mt(const BsgsMtOptions& opt){
       res[ni].pre.build(targets33.data(), targets33.size()/33);
       res[ni].exact.build(targets33.data(), targets33.size()/33, 0.80);
     }
+  }
+  // --- Random mode? Do random hops forever (Ctrl+C to stop) ---
+  if (opt.random_mode) {
+    // Compute 64-bit "steps per hop": how many giant steps before re-seeding randomly.
+    // We interpret -n as "keys to scan before re-seeding". Each giant step covers ~m candidates.
+    // So steps_per_hop = max(1, floor(n / m)). If n==0, default to 1 giant step per hop.
+    uint64_t steps_per_hop = 1;
+    if (opt.random_keys > 0 && opt.baby_size > 0) {
+      steps_per_hop = opt.random_keys / opt.baby_size;
+      if (steps_per_hop == 0) steps_per_hop = 1;
+    }
+
+    // Helpful print
+    fprintf(stderr,
+      "[bsgs-mt] random mode: steps_per_hop=%llu (n=%llu, m=%llu)\n",
+      (unsigned long long)steps_per_hop,
+      (unsigned long long)opt.random_keys,
+      (unsigned long long)opt.baby_size);
+
+    // How many worker threads in total we will use
+    int total_threads = (opt.threads > 0 ? opt.threads : cpu_count());
+
+    // We’ll run forever, picking a fresh random i-begin in [q0..q1] each hop
+    // and running steps_per_hop giant steps from there (spread across threads/nodes).
+    while (true) {
+      // Pick random i-begin = q0 + (rand64() % span)
+      uint64_t span = span_u64_or_max(q0, q1);
+      uint64_t rnd  = (span ? (rand64() % span) : 0ull);
+
+      // 64-bit path if q0 and q1 fit; else full-precision i_begin via Int
+      uint64_t i0_64, i1_64;
+      bool q0_fit = int_to_u64_exact(q0, i0_64);
+      bool q1_fit = int_to_u64_exact(q1, i1_64);
+
+      if (q0_fit && q1_fit) {
+        // --- 64-bit random hop ---
+        uint64_t i_begin = i0_64 + rnd;
+        if (i_begin > i1_64) i_begin = i0_64; // just in case
+        uint64_t cnt = steps_per_hop;
+        if (cnt > (i1_64 - i_begin + 1)) cnt = (i1_64 - i_begin + 1);
+
+        fprintf(stderr,
+          "[bsgs-mt] random hop (64b): i=%llu, steps=%llu, threads=%d\n",
+          (unsigned long long)i_begin,
+          (unsigned long long)cnt,
+          total_threads);
+
+        // fan-out over nodes/threads (same style as your deterministic 64-bit path)
+        std::vector<std::thread> pool;
+        for(size_t ni=0; ni<nodes.size(); ++ni){
+          const auto& R = res[ni];
+          for (int t=0; t<total_threads; ++t) {
+            uint64_t tb = (cnt * (uint64_t)t)    / (uint64_t)total_threads;
+            uint64_t te = (cnt * (uint64_t)(t+1))/ (uint64_t)total_threads;
+            uint64_t c  = (te > tb) ? (te - tb) : 0;
+            if (!c) continue;
+            uint64_t i_begin_t = i_begin + tb;
+            pool.emplace_back([&, ni, i_begin_t, c, t]{
+              pin_thread_to_node_cpu(nodes[ni], t);
+              bool is_reporter = (ni == 0 && t == 0);
+              worker_bsgs_64(res[ni], i_begin_t, c, opt.block_size, secp, targetsP,
+                             i0_64, i1_64, (uint64_t)opt.baby_size, is_reporter);
+            });
+          }
+        }
+        for (auto& th: pool) th.join();
+      } else {
+        // --- Big-int random hop ---
+        Int rndI; rndI.Set((uint64_t)rnd);   // rnd is 64-bit, add to q0
+        Int i_begin(q0); i_begin.Add(&rndI);
+
+        // clamp cnt if we’re near the end: cnt = min(steps_per_hop, q1 - i_begin + 1)
+        Int one((uint64_t)1);
+        Int remain(q1); remain.Sub(&i_begin); remain.Add(&one);
+        uint64_t cnt = u64_lo_from_Int(remain);
+        if (cnt == 0) cnt = 1;
+        if (cnt > steps_per_hop) cnt = steps_per_hop;
+
+        fprintf(stderr,
+          "[bsgs-mt] random hop (big): steps=%llu, threads=%d\n",
+          (unsigned long long)cnt, total_threads);
+
+        std::vector<std::thread> pool;
+        for(size_t ni=0; ni<nodes.size(); ++ni){
+          const auto& R = res[ni];
+          for (int t=0; t<total_threads; ++t) {
+            uint64_t tb = (cnt * (uint64_t)t)    / (uint64_t)total_threads;
+            uint64_t te = (cnt * (uint64_t)(t+1))/ (uint64_t)total_threads;
+            uint64_t c  = (te > tb) ? (te - tb) : 0;
+            if (!c) continue;
+
+            // i_begin_t = i_begin + tb (Int)
+            Int i_begin_t(i_begin); i_begin_t.Add(tb);
+
+            pool.emplace_back([&, ni, i_begin_t, c, t]{
+              pin_thread_to_node_cpu(nodes[ni], t);
+              bool is_reporter = (ni == 0 && t == 0);
+              worker_bsgs_big(res[ni], i_begin_t, c, opt.block_size, secp,
+                              targetsP, K0, K1, mInt, is_reporter);
+            });
+          }
+        }
+        for (auto& th: pool) th.join();
+      }
+      // loop forever; Ctrl+C to stop
+    } // while(true)
+
+    // unreachable
   }
 
   // --- Decide scheduling path: 64-bit fast path vs. big-range chunking ---
