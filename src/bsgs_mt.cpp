@@ -567,25 +567,31 @@ int run_bsgs_mt(const BsgsMtOptions& opt){
         // fan-out over nodes/threads (same style as your deterministic 64-bit path)
         std::vector<std::thread> pool;
         for(size_t ni=0; ni<nodes.size(); ++ni){
-          const auto& R = res[ni];
           for (int t=0; t<total_threads; ++t) {
             uint64_t tb = (cnt * (uint64_t)t)    / (uint64_t)total_threads;
             uint64_t te = (cnt * (uint64_t)(t+1))/ (uint64_t)total_threads;
             uint64_t c  = (te > tb) ? (te - tb) : 0;
             if (!c) continue;
-            uint64_t i_begin_t = i_begin + tb;
-            pool.emplace_back([&, ni, i_begin_t, c, t]{
+
+            uint64_t i_begin_t_u64 = i_begin + tb;
+
+            pool.emplace_back([&, ni, i_begin_t_u64, c, t]{
               pin_thread_to_node_cpu(nodes[ni], t);
               bool is_reporter = (ni == 0 && t == 0);
-              worker_bsgs_64(res[ni], i_begin_t, c, opt.block_size, secp, targetsP,
-                             i0_64, i1_64, (uint64_t)opt.baby_size, is_reporter);
+
+              // convert u64 -> Int
+              Int i_begin_big; i_begin_big.SetInt32(0); i_begin_big.Add(i_begin_t_u64);
+
+              // reuse existing worker (needs K0, K1, mInt which are already in scope)
+              worker_bsgs_big(res[ni], i_begin_big, c, opt.block_size, secp,
+                              targetsP, K0, K1, mInt, is_reporter);
             });
           }
         }
         for (auto& th: pool) th.join();
       } else {
         // --- Big-int random hop ---
-        Int rndI; rndI.Set((uint64_t)rnd);   // rnd is 64-bit, add to q0
+        Int rndI; rndI.SetInt32(0); rndI.Add((uint64_t)rnd); // rnd is 64-bit, add to q0
         Int i_begin(q0); i_begin.Add(&rndI);
 
         // clamp cnt if we’re near the end: cnt = min(steps_per_hop, q1 - i_begin + 1)
@@ -609,7 +615,7 @@ int run_bsgs_mt(const BsgsMtOptions& opt){
             if (!c) continue;
 
             // i_begin_t = i_begin + tb (Int)
-            Int i_begin_t(i_begin); i_begin_t.Add(tb);
+            Int i_begin_t; i_begin_t.Set(&i_begin); i_begin_t.Add(tb);
 
             pool.emplace_back([&, ni, i_begin_t, c, t]{
               pin_thread_to_node_cpu(nodes[ni], t);
